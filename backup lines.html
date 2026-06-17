@@ -47,21 +47,14 @@ const svg = document.getElementById("svg");
 const L = 1;
 const W = 4;
 
-// Replaces SCALE
 const PIXELS_PER_METER = 90;
-
-// Perspective strength.
-// Larger = flatter.
-// Smaller = stronger taper.
 const FOCAL_LENGTH = 6.0;
-
-// Optional future tuning
 const CAMERA_HEIGHT = 1.0;
 
 const STEP = 0.18;
 const PATH_LENGTH = 6.5;
 
-// zone lengths
+// zones
 const RED_LEN = 2.2;
 const YELLOW_LEN = 4.5;
 const GREEN_LEN = 7.5;
@@ -74,6 +67,10 @@ const YELLOW_INSET = 0.015;
 
 let steering = 0;
 let targetSteering = 0;
+
+let lastTime = performance.now();
+
+
 
 // =========================
 // STEERING MODEL
@@ -90,8 +87,9 @@ function radius(delta) {
     return L / Math.tan(delta);
 }
 
+
 // =========================
-// CENTER PATH
+// CENTER PATH (FIXED INTEGRATION)
 // =========================
 
 function buildCenterline(R, turnDir) {
@@ -105,15 +103,13 @@ function buildCenterline(R, turnDir) {
 
     for (let i = 0; i < steps; i++) {
 
-        const vx = Math.cos(h);
-        const vy = Math.sin(h);
+        // arc-consistent heading update
+        const dTheta = (STEP / R) * turnDir;
+        h += dTheta;
 
-        x += vx * STEP;
-        y += vy * STEP;
-
-        if (R !== Infinity) {
-            h += (STEP / R) * turnDir;
-        }
+        // integrate along updated heading (fixes drift + curvature instability)
+        x += Math.cos(h) * STEP;
+        y += Math.sin(h) * STEP;
 
         pts.push({ x, y, h });
     }
@@ -122,34 +118,19 @@ function buildCenterline(R, turnDir) {
 }
 
 // =========================
-// PROJECTION
+// PROJECTION (FIXED: FULL PERSPECTIVE)
 // =========================
 
 function projectPoint(wx, wy, cx, cy) {
 
-    // Distance from vehicle.
-    // Positive values are farther away.
     const depth = Math.max(0, -wy);
 
     const perspective =
         FOCAL_LENGTH / (FOCAL_LENGTH + depth);
 
-    const sx =
-        cx +
-        wx *
-        perspective *
-        PIXELS_PER_METER;
-
-    // Keep Y linear.
-    // Only X tapers.
-    const sy =
-        cy +
-        wy *
-        PIXELS_PER_METER;
-
     return {
-        x: sx,
-        y: sy
+        x: cx + wx * perspective * PIXELS_PER_METER,
+        y: cy + wy * perspective * PIXELS_PER_METER
     };
 }
 
@@ -165,19 +146,9 @@ function buildLane(points, cx, cy, offset, maxDist) {
     for (let i = 0; i < points.length; i++) {
 
         if (i > 0) {
-
-            const dx =
-                points[i].x -
-                points[i - 1].x;
-
-            const dy =
-                points[i].y -
-                points[i - 1].y;
-
-            acc += Math.sqrt(
-                dx * dx +
-                dy * dy
-            );
+            const dx = points[i].x - points[i - 1].x;
+            const dy = points[i].y - points[i - 1].y;
+            acc += Math.sqrt(dx * dx + dy * dy);
         }
 
         if (acc > maxDist) break;
@@ -187,25 +158,12 @@ function buildLane(points, cx, cy, offset, maxDist) {
         const nx = -Math.sin(p.h);
         const ny = Math.cos(p.h);
 
-        const worldX =
-            p.x +
-            nx * offset;
+        const worldX = p.x + nx * offset;
+        const worldY = p.y + ny * offset;
 
-        const worldY =
-            p.y +
-            ny * offset;
+        const proj = projectPoint(worldX, worldY, cx, cy);
 
-        const proj =
-            projectPoint(
-                worldX,
-                worldY,
-                cx,
-                cy
-            );
-
-        path +=
-            (i === 0 ? "M" : "L") +
-            `${proj.x} ${proj.y} `;
+        path += (i === 0 ? "M" : "L") + `${proj.x} ${proj.y} `;
     }
 
     return path;
@@ -227,14 +185,11 @@ function pointAtDistance(points, targetDist) {
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
 
-        const segLen =
-            Math.sqrt(dx * dx + dy * dy);
+        const segLen = Math.sqrt(dx * dx + dy * dy);
 
         if (acc + segLen >= targetDist) {
 
-            const t =
-                (targetDist - acc) /
-                segLen;
+            const t = (targetDist - acc) / segLen;
 
             return {
                 x: p0.x + dx * t,
@@ -258,42 +213,24 @@ function crossbar(p, cx, cy, offset, color) {
     const nx = -Math.sin(p.h);
     const ny = Math.cos(p.h);
 
-    const leftWorldX =
-        p.x + nx * -offset;
+    const left = projectPoint(
+        p.x + nx * -offset,
+        p.y + ny * -offset,
+        cx,
+        cy
+    );
 
-    const leftWorldY =
-        p.y + ny * -offset;
-
-    const rightWorldX =
-        p.x + nx * offset;
-
-    const rightWorldY =
-        p.y + ny * offset;
-
-    const left =
-        projectPoint(
-            leftWorldX,
-            leftWorldY,
-            cx,
-            cy
-        );
-
-    const right =
-        projectPoint(
-            rightWorldX,
-            rightWorldY,
-            cx,
-            cy
-        );
+    const right = projectPoint(
+        p.x + nx * offset,
+        p.y + ny * offset,
+        cx,
+        cy
+    );
 
     return `
-        <line
-            class="guide ${color}"
-            x1="${left.x}"
-            y1="${left.y}"
-            x2="${right.x}"
-            y2="${right.y}"
-        />
+        <line class="guide ${color}"
+            x1="${left.x}" y1="${left.y}"
+            x2="${right.x}" y2="${right.y}" />
     `;
 }
 
@@ -309,82 +246,26 @@ function updatePaths() {
     const cx = w / 2;
     const cy = h;
 
-    const delta =
-        steeringToDelta(steering);
+    const delta = steeringToDelta(steering);
+    const Rraw = radius(delta);
+    const turnDir = delta >= 0 ? 1 : -1;
 
-    const Rraw =
-        radius(delta);
-
-    const turnDir =
-        delta >= 0 ? 1 : -1;
-
-    const centerline =
-        buildCenterline(
-            Math.max(
-                2.5,
-                Math.abs(Rraw)
-            ),
-            turnDir
-        );
+    const centerline = buildCenterline(
+        Math.max(2.5, Math.abs(Rraw)),
+        turnDir
+    );
 
     const half = W / 2;
 
-    const L_green =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            -half,
-            GREEN_LEN
-        );
+    const L_green = buildLane(centerline, cx, cy, -half, GREEN_LEN);
+    const L_yellow = buildLane(centerline, cx, cy, -half, YELLOW_LEN);
+    const L_red = buildLane(centerline, cx, cy, -half, RED_LEN);
 
-    const L_yellow =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            -half + YELLOW_INSET,
-            YELLOW_LEN
-        );
-
-    const L_red =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            -half,
-            RED_LEN
-        );
-
-    const R_green =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            half,
-            GREEN_LEN
-        );
-
-    const R_yellow =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            half - YELLOW_INSET,
-            YELLOW_LEN
-        );
-
-    const R_red =
-        buildLane(
-            centerline,
-            cx,
-            cy,
-            half,
-            RED_LEN
-        );
+    const R_green = buildLane(centerline, cx, cy, half, GREEN_LEN);
+    const R_yellow = buildLane(centerline, cx, cy, half, YELLOW_LEN);
+    const R_red = buildLane(centerline, cx, cy, half, RED_LEN);
 
     let out = `
-
         <path class="guide green" d="${L_green}" />
         <path class="guide yellow" d="${L_yellow}" />
         <path class="guide red" d="${L_red}" />
@@ -392,53 +273,15 @@ function updatePaths() {
         <path class="guide green" d="${R_green}" />
         <path class="guide yellow" d="${R_yellow}" />
         <path class="guide red" d="${R_red}" />
-
     `;
 
-    const redP =
-        pointAtDistance(
-            centerline,
-            RED_LEN
-        );
+    const redP = pointAtDistance(centerline, RED_LEN);
+    const yellowP = pointAtDistance(centerline, YELLOW_LEN);
+    const greenP = pointAtDistance(centerline, GREEN_LEN);
 
-    const yellowP =
-        pointAtDistance(
-            centerline,
-            YELLOW_LEN
-        );
-
-    const greenP =
-        pointAtDistance(
-            centerline,
-            GREEN_LEN
-        );
-
-    out +=
-        crossbar(
-            redP,
-            cx,
-            cy,
-            half,
-            "red"
-        );
-
-    out +=
-        crossbar(
-            yellowP,
-            cx,
-            cy,
-            half,
-            "yellow"
-        );
-
-    out +=
-        crossbar(
-            greenP,
-            cx,
-            cy,
-            half,
-            "green"
-        );
+    out += crossbar(redP, cx, cy, half, "red");
+    out += crossbar(yellowP, cx, cy, half, "yellow");
+    out += crossbar(greenP, cx, cy, half, "green");
 
     svg.innerHTML = out;
 }
@@ -447,17 +290,19 @@ function updatePaths() {
 // LOOP
 // =========================
 
-function animate() {
+function animate(now) {
 
-    steering +=
-        (targetSteering - steering) *
-        0.18;
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+
+    // // frame-rate independent smoothing
+    // const smoothing = 1 - Math.pow(0.001, dt);
+
+    steering += (targetSteering - steering) * 0.18;
 
     updatePaths();
 
-    requestAnimationFrame(
-        animate
-    );
+    requestAnimationFrame(animate);
 }
 
 animate();
@@ -466,30 +311,14 @@ animate();
 // WEBSOCKET
 // =========================
 
-const ws =
-    new WebSocket(
-        "ws://127.0.0.1:8765"
-    );
+const ws = new WebSocket("ws://127.0.0.1:8765");
 
 ws.onmessage = (event) => {
 
-    const data =
-        JSON.parse(
-            event.data
-        );
+    const data = JSON.parse(event.data);
 
-    if (
-        data.type ===
-        "steering"
-    ) {
-        targetSteering =
-            Math.max(
-                -100,
-                Math.min(
-                    100,
-                    data.angle
-                )
-            );
+    if (data.type === "steering") {
+        targetSteering = Math.max(-100, Math.min(100, data.angle));
     }
 };
 
