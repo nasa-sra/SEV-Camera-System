@@ -8,7 +8,7 @@
 <style>
 html, body {
     margin: 0;
-    width: 100%;
+    width:  100%;
     height: 100%;
     background: transparent;
     overflow: hidden;
@@ -23,8 +23,6 @@ svg {
     fill: none;
     stroke-width: 5;
     stroke-linecap: round;
-
-    /* 🔥 stabilizes anti-aliasing flicker */
     shape-rendering: geometricPrecision;
 }
 
@@ -46,20 +44,20 @@ const svg = document.getElementById("svg");
 // VEHICLE MODEL
 // =========================
 
-const L = 2.7;
-const W = 4;
-const SCALE = 60;
+const L = 0.8;
+const W = 6.5;
+
+const PIXELS_PER_METER = 85;
+const FOCAL_LENGTH = 10.2;
+const CAMERA_HEIGHT = 0.2;
 
 const STEP = 0.18;
-const PATH_LENGTH = 8.5;
+const PATH_LENGTH = 6.5;
 
-// zone lengths
+// zones
 const RED_LEN = 2.2;
 const YELLOW_LEN = 4.5;
 const GREEN_LEN = 7.5;
-
-// 🔥 tiny deterministic separation to prevent overlap flicker
-const YELLOW_INSET = 0.015;
 
 // =========================
 // STATE
@@ -68,12 +66,14 @@ const YELLOW_INSET = 0.015;
 let steering = 0;
 let targetSteering = 0;
 
+let lastTime = performance.now();
+
 // =========================
 // STEERING MODEL
 // =========================
 
 function steeringToDelta(sas) {
-    const max = 35 * Math.PI / 180;
+    const max = 15 * Math.PI / 180;
     const n = sas / 100;
     return Math.sign(n) * Math.pow(Math.abs(n), 0.65) * max;
 }
@@ -84,7 +84,7 @@ function radius(delta) {
 }
 
 // =========================
-// CENTER PATH
+// CENTER PATH (FIXED INTEGRATION)
 // =========================
 
 function buildCenterline(R, turnDir) {
@@ -98,20 +98,35 @@ function buildCenterline(R, turnDir) {
 
     for (let i = 0; i < steps; i++) {
 
-        const vx = Math.cos(h);
-        const vy = Math.sin(h);
+        // arc-consistent heading update
+        const dTheta = (STEP / R) * turnDir;
+        h += dTheta;
 
-        x += vx * STEP;
-        y += vy * STEP;
-
-        if (R !== Infinity) {
-            h += (STEP / R) * turnDir;
-        }
+        // integrate along updated heading (fixes drift + curvature instability)
+        x += Math.cos(h) * STEP;
+        y += Math.sin(h) * STEP;
 
         pts.push({ x, y, h });
     }
 
     return pts;
+}
+
+// =========================
+// PROJECTION (FIXED: FULL PERSPECTIVE)
+// =========================
+
+function projectPoint(wx, wy, cx, cy) {
+
+    const depth = Math.max(0, -wy);
+
+    const perspective =
+        FOCAL_LENGTH / (FOCAL_LENGTH + depth);
+
+    return {
+        x: cx + wx * perspective * PIXELS_PER_METER,
+        y: cy + wy * perspective * PIXELS_PER_METER
+    };
 }
 
 // =========================
@@ -128,7 +143,7 @@ function buildLane(points, cx, cy, offset, maxDist) {
         if (i > 0) {
             const dx = points[i].x - points[i - 1].x;
             const dy = points[i].y - points[i - 1].y;
-            acc += Math.sqrt(dx * dx + dy * dy);
+            acc += Math.hypot(dx, dy);
         }
 
         if (acc > maxDist) break;
@@ -138,13 +153,12 @@ function buildLane(points, cx, cy, offset, maxDist) {
         const nx = -Math.sin(p.h);
         const ny = Math.cos(p.h);
 
-        let o = offset;
+        const worldX = p.x + nx * offset;
+        const worldY = p.y + ny * offset;
 
-        // 🔥 subtle bias ONLY for yellow system (passed via offset sign)
-        const px = cx + (p.x + nx * o) * SCALE;
-        const py = cy + (p.y + ny * o) * SCALE;
+        const proj = projectPoint(worldX, worldY, cx, cy);
 
-        path += (i === 0 ? "M" : "L") + `${px} ${py} `;
+        path += (i === 0 ? "M" : "L") + `${proj.x} ${proj.y} `;
     }
 
     return path;
@@ -194,15 +208,25 @@ function crossbar(p, cx, cy, offset, color) {
     const nx = -Math.sin(p.h);
     const ny = Math.cos(p.h);
 
-    const leftX  = cx + (p.x + nx * -offset) * SCALE;
-    const leftY  = cy + (p.y + ny * -offset) * SCALE;
+    const left = projectPoint(
+        p.x + nx * -offset,
+        p.y + ny * -offset,
+        cx,
+        cy
+    );
 
-    const rightX = cx + (p.x + nx * offset) * SCALE;
-    const rightY = cy + (p.y + ny * offset) * SCALE;
+    const right = projectPoint(
+        p.x + nx * offset,
+        p.y + ny * offset,
+        cx,
+        cy
+    );
 
-    return `<line class="guide ${color}"
-        x1="${leftX}" y1="${leftY}"
-        x2="${rightX}" y2="${rightY}" />`;
+    return `
+        <line class="guide ${color}"
+            x1="${left.x}" y1="${left.y}"
+            x2="${right.x}" y2="${right.y}" />
+    `;
 }
 
 // =========================
@@ -217,8 +241,6 @@ function updatePaths() {
     const cx = w / 2;
     const cy = h;
 
-    svg.innerHTML = "";
-
     const delta = steeringToDelta(steering);
     const Rraw = radius(delta);
     const turnDir = delta >= 0 ? 1 : -1;
@@ -230,35 +252,27 @@ function updatePaths() {
 
     const half = W / 2;
 
-    // =========================
-    // DRAW ORDER FIX (GREEN FIRST)
-    // =========================
+    const L_green = buildLane(centerline, cx, cy, -half, GREEN_LEN);
+    const L_yellow = buildLane(centerline, cx, cy, -half, YELLOW_LEN);
+    const L_red = buildLane(centerline, cx, cy, -half, RED_LEN);
 
-    const L_green  = buildLane(centerline, cx, cy, -half, GREEN_LEN);
-    const L_yellow = buildLane(centerline, cx, cy, -half + YELLOW_INSET, YELLOW_LEN);
-    const L_red    = buildLane(centerline, cx, cy, -half, RED_LEN);
-
-    const R_green  = buildLane(centerline, cx, cy,  half, GREEN_LEN);
-    const R_yellow = buildLane(centerline, cx, cy,  half - YELLOW_INSET, YELLOW_LEN);
-    const R_red    = buildLane(centerline, cx, cy,  half, RED_LEN);
+    const R_green = buildLane(centerline, cx, cy, half, GREEN_LEN);
+    const R_yellow = buildLane(centerline, cx, cy, half, YELLOW_LEN);
+    const R_red = buildLane(centerline, cx, cy, half, RED_LEN);
 
     let out = `
-
-        <!-- LEFT SIDE -->
-        <path class="guide green"  d="${L_green}" />
+        <path class="guide green" d="${L_green}" />
         <path class="guide yellow" d="${L_yellow}" />
-        <path class="guide red"    d="${L_red}" />
+        <path class="guide red" d="${L_red}" />
 
-        <!-- RIGHT SIDE -->
-        <path class="guide green"  d="${R_green}" />
+        <path class="guide green" d="${R_green}" />
         <path class="guide yellow" d="${R_yellow}" />
-        <path class="guide red"    d="${R_red}" />
-
+        <path class="guide red" d="${R_red}" />
     `;
 
-    const redP    = pointAtDistance(centerline, RED_LEN);
+    const redP = pointAtDistance(centerline, RED_LEN);
     const yellowP = pointAtDistance(centerline, YELLOW_LEN);
-    const greenP  = pointAtDistance(centerline, GREEN_LEN);
+    const greenP = pointAtDistance(centerline, GREEN_LEN);
 
     out += crossbar(redP, cx, cy, half, "red");
     out += crossbar(yellowP, cx, cy, half, "yellow");
@@ -271,9 +285,9 @@ function updatePaths() {
 // LOOP
 // =========================
 
-function animate() {
-
-    steering += (targetSteering - steering) * 0.18;
+function animate(now) {
+    lastTime = now;
+    steering += (targetSteering - steering) * 0.3;
 
     updatePaths();
 
@@ -289,6 +303,7 @@ animate();
 const ws = new WebSocket("ws://127.0.0.1:8765");
 
 ws.onmessage = (event) => {
+
     const data = JSON.parse(event.data);
 
     if (data.type === "steering") {
