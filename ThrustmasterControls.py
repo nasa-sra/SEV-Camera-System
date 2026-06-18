@@ -1,5 +1,4 @@
 import pygame
-import asyncio
 import json
 import threading
 from websocket_server import WebsocketServer
