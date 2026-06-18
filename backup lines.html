@@ -60,11 +60,22 @@ const YELLOW_LEN = 4.5;
 const GREEN_LEN = 7.5;
 
 // =========================
+// FRAME OVERLAY
+// =========================
+
+const FRAME_PADDING = 40;      // distance from screen edges
+const FRAME_STROKE = 16;        // thickness
+const CORNER_RADIUS = 140;      // curvature size
+
+const FRAME_COLOR = "#00ffff"; // easy to change later
+
+// =========================
 // STATE
 // =========================
 
 let steering = 0;
 let targetSteering = 0;
+let distances = [2,2,2,2,2];
 
 let lastTime = performance.now();
 
@@ -233,6 +244,136 @@ function crossbar(p, cx, cy, offset, color) {
 // DRAW
 // =========================
 
+function drawFrame(w, h, values) {
+
+    const left = FRAME_PADDING;
+    const right = w - FRAME_PADDING;
+    const top = FRAME_PADDING;
+
+    const midTop = top + CORNER_RADIUS;
+
+    const [
+        leftVal,
+        curveLVal,
+        topVal,
+        curveRVal,
+        rightVal    
+    ] = values;
+
+    const topI = getSegmentInfluence(topVal);
+    const leftI = getSegmentInfluence(leftVal);
+    const rightI = getSegmentInfluence(rightVal);
+    const curveLI = getSegmentInfluence(curveLVal);
+    const curveRI = getSegmentInfluence(curveRVal);
+
+    // inward contraction amount (tunable)
+    const MAX_PAD = 120;
+
+    // space in between lines
+    const GAP = 32;
+
+    return `
+        <!-- TOP HORIZONTAL LINE -->
+        <line x1="${left + CORNER_RADIUS + MAX_PAD * topI + GAP}" y1="${top + MAX_PAD * topI}"
+              x2="${right - CORNER_RADIUS - MAX_PAD * topI - GAP}" y2="${top + MAX_PAD * topI}"
+              stroke="${getSegmentColor(topVal)}"
+              stroke-width="${FRAME_STROKE}"
+              stroke-linecap="round" />
+
+        <!-- LEFT VERTICAL LINE -->
+        <line x1="${left + MAX_PAD * leftI}" y1="${midTop + MAX_PAD * leftI + GAP}"
+              x2="${left + MAX_PAD * leftI}" y2="${h - FRAME_PADDING}"
+              stroke="${getSegmentColor(leftVal)}"
+              stroke-width="${FRAME_STROKE}"
+              stroke-linecap="round" />
+
+        <!-- RIGHT VERTICAL LINE -->
+        <line x1="${right - MAX_PAD * rightI}" y1="${midTop + MAX_PAD * rightI + GAP}"
+              x2="${right - MAX_PAD * rightI}" y2="${h - FRAME_PADDING}"
+              stroke="${getSegmentColor(rightVal)}"
+              stroke-width="${FRAME_STROKE}"
+              stroke-linecap="round" />
+
+        <!-- TOP LEFT CURVE -->
+        <path d="
+            M ${left + MAX_PAD * curveLI} ${midTop + MAX_PAD * curveLI}
+            Q ${left + MAX_PAD * curveLI} ${top + MAX_PAD * curveLI} ${left + CORNER_RADIUS + MAX_PAD * curveLI} ${top + MAX_PAD * curveLI}
+        "
+        fill="none"
+        stroke="${getSegmentColor(curveLVal)}"
+        stroke-width="${FRAME_STROKE}"
+        stroke-linecap="round" />
+
+        <!-- TOP RIGHT CURVE -->
+        <path d="
+            M ${right - MAX_PAD * curveRI} ${midTop + MAX_PAD * curveRI}
+            Q ${right - MAX_PAD * curveRI} ${top + MAX_PAD * curveRI} ${right - CORNER_RADIUS - MAX_PAD * curveRI} ${top + MAX_PAD * curveRI}
+        "
+        fill="none"
+        stroke="${getSegmentColor(curveRVal)}"
+        stroke-width="${FRAME_STROKE}"
+        stroke-linecap="round" />
+    `;
+}
+
+function getSegmentColor(value) {
+
+    // adjustable thresholds
+    const MIN = 1;   // below this = red
+    const MAX = 2;   // above this = green
+
+    const RED = { r: 255, g: 0, b: 0 };
+    const YELLOW = { r: 255, g: 255, b: 0 };
+    const GREEN = { r: 0, g: 200, b: 0 }; // bright green (adjust if needed)
+
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
+    }
+
+    function rgb(c) {
+        return `rgb(${c.r | 0}, ${c.g | 0}, ${c.b | 0})`;
+    }
+
+    // clamp helpers
+    if (value <= MIN) return rgb(RED);
+    if (value >= MAX) return rgb(GREEN);
+
+    // split into two segments:
+    const mid = (MIN + MAX) / 2;
+
+    if (value <= mid) {
+        // red -> yellow
+        const t = (value - MIN) / (mid - MIN);
+        return rgb({
+            r: lerp(RED.r, YELLOW.r, t),
+            g: lerp(RED.g, YELLOW.g, t),
+            b: lerp(RED.b, YELLOW.b, t)
+        });
+    } else {
+        // yellow -> green
+        const t = (value - mid) / (MAX - mid);
+        return rgb({
+            r: lerp(YELLOW.r, GREEN.r, t),
+            g: lerp(YELLOW.g, GREEN.g, t),
+            b: lerp(YELLOW.b, GREEN.b, t)
+        });
+    }
+}
+
+function getSegmentInfluence(value) {
+
+    const MIN = 1;
+    const MAX = 2;
+
+    // clamp + invert so:
+    // 2 => 0 (no shrink)
+    // 1 => 1 (max shrink)
+    if (value >= MAX) return 0;
+    if (value <= MIN) return 1;
+
+    return (MAX - value) / (MAX - MIN);
+}
+
 function updatePaths() {
 
     const w = window.innerWidth;
@@ -261,6 +402,8 @@ function updatePaths() {
     const R_red = buildLane(centerline, cx, cy, half, RED_LEN);
 
     let out = `
+        ${drawFrame(w, h, distances)}
+
         <path class="guide green" d="${L_green}" />
         <path class="guide yellow" d="${L_yellow}" />
         <path class="guide red" d="${L_red}" />
@@ -300,14 +443,23 @@ animate();
 // WEBSOCKET
 // =========================
 
-const ws = new WebSocket("ws://127.0.0.1:8765");
+const wsController = new WebSocket("ws://127.0.0.1:8765");
+const wsRealsense = new WebSocket("ws://127.0.0.1:8766");
 
-ws.onmessage = (event) => {
+wsController.onmessage = (event) => {
 
     const data = JSON.parse(event.data);
 
     if (data.type === "steering") {
         targetSteering = Math.max(-100, Math.min(100, data.angle));
+    }
+};
+wsRealsense.onmessage = (event) => {
+
+    const data = JSON.parse(event.data);
+
+    if (data.type === "realsense") {
+        distances = data.distances;
     }
 };
 
