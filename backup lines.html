@@ -8,7 +8,7 @@
 <style>
 html, body {
     margin: 0;
-    width: 100%;
+    width:  100%;
     height: 100%;
     background: transparent;
     overflow: hidden;
@@ -44,12 +44,12 @@ const svg = document.getElementById("svg");
 // VEHICLE MODEL
 // =========================
 
-const L = 1;
-const W = 4;
+const L = 0.8;
+const W = 6.5;
 
-const PIXELS_PER_METER = 90;
-const FOCAL_LENGTH = 6.0;
-const CAMERA_HEIGHT = 1.0;
+const PIXELS_PER_METER = 85;
+const FOCAL_LENGTH = 10.2;
+const CAMERA_HEIGHT = 0.2;
 
 const STEP = 0.18;
 const PATH_LENGTH = 6.5;
@@ -58,8 +58,6 @@ const PATH_LENGTH = 6.5;
 const RED_LEN = 2.2;
 const YELLOW_LEN = 4.5;
 const GREEN_LEN = 7.5;
-
-const YELLOW_INSET = 0.015;
 
 // =========================
 // STATE
@@ -70,14 +68,12 @@ let targetSteering = 0;
 
 let lastTime = performance.now();
 
-
-
 // =========================
 // STEERING MODEL
 // =========================
 
 function steeringToDelta(sas) {
-    const max = 35 * Math.PI / 180;
+    const max = 15 * Math.PI / 180;
     const n = sas / 100;
     return Math.sign(n) * Math.pow(Math.abs(n), 0.65) * max;
 }
@@ -86,7 +82,6 @@ function radius(delta) {
     if (Math.abs(delta) < 0.001) return Infinity;
     return L / Math.tan(delta);
 }
-
 
 // =========================
 // CENTER PATH (FIXED INTEGRATION)
@@ -148,7 +143,7 @@ function buildLane(points, cx, cy, offset, maxDist) {
         if (i > 0) {
             const dx = points[i].x - points[i - 1].x;
             const dy = points[i].y - points[i - 1].y;
-            acc += Math.sqrt(dx * dx + dy * dy);
+            acc += Math.hypot(dx, dy);
         }
 
         if (acc > maxDist) break;
@@ -291,14 +286,8 @@ function updatePaths() {
 // =========================
 
 function animate(now) {
-
-    const dt = Math.min(0.05, (now - lastTime) / 1000);
     lastTime = now;
-
-    // // frame-rate independent smoothing
-    // const smoothing = 1 - Math.pow(0.001, dt);
-
-    steering += (targetSteering - steering) * 0.18;
+    steering += (targetSteering - steering) * 0.3;
 
     updatePaths();
 

@@ -37,7 +37,7 @@ target_steering = 0
 def new_client(client, server):
     clients.append(client)
     print("[OBS] client connected")
-
+  
 def client_left(client, server):
     if client in clients:
         clients.remove(client)
@@ -111,9 +111,6 @@ def input_loop():
                 joy_value = (abs(joy_value) - JOY_DEADZONE) / (1 - JOY_DEADZONE)
                 joy_value = sign * min(1.0, joy_value)
 
-            # =========================
-            # 🔥 OPTION 3: NONLINEAR CURVE
-            # =========================
             joy_value = response_curve(joy_value)
 
             # scale to steering range
@@ -122,16 +119,15 @@ def input_loop():
         # =========================
         # KEYBOARD OVERRIDE
         # =========================
-        left = keyboard.is_pressed("a")
-        right = keyboard.is_pressed("d")
-        center = keyboard.is_pressed("space")
-
-        if center:
+        if keyboard.is_pressed("space"):
             target_steering = 0
-        elif left and not right:
-            target_steering = -100
-        elif right and not left:
-            target_steering = 100
+        else:
+            left = keyboard.is_pressed("a")
+            right = keyboard.is_pressed("d")
+            if left and not right:
+                target_steering = -70
+            elif right and not left:
+                target_steering = 70
 
         # =========================
         # SMOOTHING
@@ -143,7 +139,7 @@ def input_loop():
         # =========================
         # SEND TO OBS
         # =========================
-        if last_sent is None or abs(steering - last_sent) > 0.5:
+        if last_sent is None or abs(steering - last_sent) > 0.2:
 
             msg = json.dumps({
                 "type": "steering",
@@ -162,7 +158,7 @@ def input_loop():
 threading.Thread(target=input_loop, daemon=True).start()
 
 print("====================================")
-print(" OBS Steering Controller (Improved)")
+print(" OBS Steering Controller")
 print(" Nonlinear steering curve enabled")
 print(" ws://127.0.0.1:8765")
 print(" ESC to quit")
