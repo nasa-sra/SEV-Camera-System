@@ -69,6 +69,9 @@ const CORNER_RADIUS = 140;      // curvature size
 
 const FRAME_COLOR = "#00ffff"; // easy to change later
 
+const FRAME_MIN = 1;
+const FRAME_MAX = 4;
+
 // =========================
 // STATE
 // =========================
@@ -317,14 +320,10 @@ function drawFrame(w, h, values) {
 }
 
 function getSegmentColor(value) {
-
-    // adjustable thresholds
-    const MIN = 1;   // below this = red
-    const MAX = 2;   // above this = green
-
     const RED = { r: 255, g: 0, b: 0 };
     const YELLOW = { r: 255, g: 255, b: 0 };
     const GREEN = { r: 0, g: 200, b: 0 }; // bright green (adjust if needed)
+    const TRANSPARENT = {a: 0};
 
     function lerp(a, b, t) {
         return a + (b - a) * t;
@@ -333,17 +332,20 @@ function getSegmentColor(value) {
     function rgb(c) {
         return `rgb(${c.r | 0}, ${c.g | 0}, ${c.b | 0})`;
     }
+    function rgba(c) {
+        return `rgba(${c.r | 0}, ${c.g | 0}, ${c.b | 0}, ${c.a})`;
+    }
 
     // clamp helpers
-    if (value <= MIN) return rgb(RED);
-    if (value >= MAX) return rgb(GREEN);
+    if (value <= FRAME_MIN) return rgb(RED);
+    if (value >= FRAME_MAX) return rgba(TRANSPARENT);
 
     // split into two segments:
-    const mid = (MIN + MAX) / 2;
+    const mid = (FRAME_MIN + FRAME_MAX) / 2;
 
     if (value <= mid) {
         // red -> yellow
-        const t = (value - MIN) / (mid - MIN);
+        const t = (value - FRAME_MIN) / (mid - FRAME_MIN);
         return rgb({
             r: lerp(RED.r, YELLOW.r, t),
             g: lerp(RED.g, YELLOW.g, t),
@@ -351,7 +353,7 @@ function getSegmentColor(value) {
         });
     } else {
         // yellow -> green
-        const t = (value - mid) / (MAX - mid);
+        const t = (value - mid) / (FRAME_MAX - mid);
         return rgb({
             r: lerp(YELLOW.r, GREEN.r, t),
             g: lerp(YELLOW.g, GREEN.g, t),
@@ -361,17 +363,13 @@ function getSegmentColor(value) {
 }
 
 function getSegmentInfluence(value) {
-
-    const MIN = 1;
-    const MAX = 2;
-
     // clamp + invert so:
     // 2 => 0 (no shrink)
     // 1 => 1 (max shrink)
-    if (value >= MAX) return 0;
-    if (value <= MIN) return 1;
+    if (value >= FRAME_MAX) return 0;
+    if (value <= FRAME_MIN) return 1;
 
-    return (MAX - value) / (MAX - MIN);
+    return (FRAME_MAX - value) / (FRAME_MAX - FRAME_MIN);
 }
 
 function updatePaths() {
