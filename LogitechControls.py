@@ -28,7 +28,6 @@ JOY_AXIS = 2
 running = True
 clients = []
 steering = 0
-target_steering = 0
 
 # =========================
 # WEBSOCKET
@@ -81,7 +80,7 @@ def response_curve(x: float) -> float:
 # =========================
 
 def input_loop():
-    global steering, target_steering, running
+    global steering, running
 
     last_sent = None
 
@@ -114,26 +113,24 @@ def input_loop():
             joy_value = response_curve(joy_value)
 
             # scale to steering range
-            target_steering = joy_value * 55
+            steering = joy_value * 55
 
         # =========================
         # KEYBOARD OVERRIDE
         # =========================
         if keyboard.is_pressed("space"):
-            target_steering = 0
+            steering = 0
         else:
             left = keyboard.is_pressed("a")
             right = keyboard.is_pressed("d")
             if left and not right:
-                target_steering = -70
+                steering = -70
             elif right and not left:
-                target_steering = 70
+                steering = 70
 
         # =========================
-        # SMOOTHING
+        # CLAMPING
         # =========================
-        steering += (target_steering - steering) * SMOOTHING
-
         steering = max(STEERING_MIN, min(STEERING_MAX, steering))
 
         # =========================

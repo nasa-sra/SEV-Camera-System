@@ -29,6 +29,7 @@ svg {
 .green { stroke: #00ff00; }
 .yellow { stroke: #ffd400; }
 .red { stroke: #ff2b2b; }
+
 </style>
 </head>
 
@@ -41,36 +42,38 @@ svg {
 const svg = document.getElementById("svg");
 
 // =========================
-// VEHICLE MODEL
+// GUIDELINES SCALING
 // =========================
 
-const L = 0.8;
-const W = 6.5;
+const WHEELBASE = 3;
+const WIDTH = 8;
 
-const PIXELS_PER_METER = 85;
-const FOCAL_LENGTH = 10.2;
-const CAMERA_HEIGHT = 0.2;
+const STEP = 0.05;
+const SCALING = 85;
 
-const STEP = 0.18;
-const PATH_LENGTH = 6.5;
+const FOCAL_SCALING = 10.2;
 
-// zones
-const RED_LEN = 2.2;
-const YELLOW_LEN = 4.5;
-const GREEN_LEN = 7.5;
+const BOT_OFFSET = 40;
+
+// section lengths / crossbar positions
+const RED_LEN = 2.0;
+const YELLOW_LEN = 2.5;
+const GREEN_LEN = 3.0;
+
+const SMOOTHING = 0.18;
 
 // =========================
 // FRAME OVERLAY
 // =========================
 
-const FRAME_PADDING = 40;      // distance from screen edges
-const FRAME_STROKE = 16;        // thickness
-const CORNER_RADIUS = 140;      // curvature size
+const FRAME_PADDING = 40;       // distance from screen edges
+const FRAME_STROKE = 16;        // thickness of the frame lines
+const CORNER_RADIUS = 200;      // radius of the top corners of the frame
+const PAD_CHANGE = 120;         // max distance from outermost to innermost position of a segment when detecting an object
+const GAP = 32;                 // space in between lines
 
-const FRAME_COLOR = "#00ffff"; // easy to change later
-
-const FRAME_MIN = 1;
 const FRAME_MAX = 4;
+const FRAME_MIN = 1;
 
 // =========================
 // STATE
@@ -78,27 +81,25 @@ const FRAME_MAX = 4;
 
 let steering = 0;
 let targetSteering = 0;
-let distances = [2,2,2,2,2];
-
-let lastTime = performance.now();
+let distances = [3.9,3.9,3.9,3.9,3.9];
 
 // =========================
-// STEERING MODEL
+// STEERING CALCULATIONS
 // =========================
 
-function steeringToDelta(sas) {
-    const max = 15 * Math.PI / 180;
-    const n = sas / 100;
+function steeringToDelta(steering) {
+    const max = 30 * Math.PI / 180;
+    const n = steering / 100;
     return Math.sign(n) * Math.pow(Math.abs(n), 0.65) * max;
 }
 
 function radius(delta) {
     if (Math.abs(delta) < 0.001) return Infinity;
-    return L / Math.tan(delta);
+    return WHEELBASE / Math.tan(delta);
 }
 
 // =========================
-// CENTER PATH (FIXED INTEGRATION)
+// CREATE CENTERLINE
 // =========================
 
 function buildCenterline(R, turnDir) {
@@ -108,15 +109,15 @@ function buildCenterline(R, turnDir) {
     let h = -Math.PI / 2;
 
     const pts = [];
-    const steps = Math.floor(PATH_LENGTH / STEP);
+    const steps = Math.floor((RED_LEN + YELLOW_LEN + GREEN_LEN) / STEP);
 
     for (let i = 0; i < steps; i++) {
 
-        // arc-consistent heading update
+        // calculates the angle change before applying it to heading
         const dTheta = (STEP / R) * turnDir;
         h += dTheta;
 
-        // integrate along updated heading (fixes drift + curvature instability)
+        // use trig to find the change in x and y based on the heading
         x += Math.cos(h) * STEP;
         y += Math.sin(h) * STEP;
 
@@ -126,75 +127,71 @@ function buildCenterline(R, turnDir) {
     return pts;
 }
 
-// =========================
-// PROJECTION (FIXED: FULL PERSPECTIVE)
-// =========================
+// ============
+// PROJECTION
+// ============
 
-function projectPoint(wx, wy, cx, cy) {
+function projectPoint(shiftedX, shiftedY, center) {
 
-    const depth = Math.max(0, -wy);
+    const depth = Math.max(0, -shiftedY);
 
-    const perspective =
-        FOCAL_LENGTH / (FOCAL_LENGTH + depth);
+    const perspective = FOCAL_SCALING / (FOCAL_SCALING + depth);
 
     return {
-        x: cx + wx * perspective * PIXELS_PER_METER,
-        y: cy + wy * perspective * PIXELS_PER_METER
+        x: center.x + shiftedX * perspective * SCALING,
+        y: center.y + shiftedY * perspective * SCALING
     };
 }
 
-// =========================
-// OFFSET + TRIM PATH
-// =========================
-
-function buildLane(points, cx, cy, offset, maxDist) {
+function buildLane(centerline, center, offset, start, length) {
 
     let path = "";
     let acc = 0;
+    let started = false;
 
-    for (let i = 0; i < points.length; i++) {
+    for (let i = 0; i < centerline.length; i++) {
 
         if (i > 0) {
-            const dx = points[i].x - points[i - 1].x;
-            const dy = points[i].y - points[i - 1].y;
+            const dx = centerline[i].x - centerline[i - 1].x;
+            const dy = centerline[i].y - centerline[i - 1].y;
             acc += Math.hypot(dx, dy);
         }
 
-        if (acc > maxDist) break;
+        if (acc < start) continue;
+        if (acc > start + length) break;
 
-        const p = points[i];
+        const p = centerline[i];
 
-        const nx = -Math.sin(p.h);
-        const ny = Math.cos(p.h);
+        const unitX = -Math.sin(p.h);
+        const unitY = Math.cos(p.h);
 
-        const worldX = p.x + nx * offset;
-        const worldY = p.y + ny * offset;
+        const shiftedX = p.x + unitX * offset;
+        const shiftedY = p.y + unitY * offset;
 
-        const proj = projectPoint(worldX, worldY, cx, cy);
+        const proj = projectPoint(shiftedX, shiftedY, center);
 
-        path += (i === 0 ? "M" : "L") + `${proj.x} ${proj.y} `;
+        path += (started ? "L" : "M") + `${proj.x} ${proj.y} `;
+
+        started = true;
     }
 
     return path;
 }
 
-// =========================
-// POINT AT DISTANCE
-// =========================
-
-function pointAtDistance(points, targetDist) {
+function pointAtDistance(centerline, targetDist) {
 
     let acc = 0;
 
-    for (let i = 1; i < points.length; i++) {
+    for (let i = 1; i < centerline.length; i++) {
 
-        const p0 = points[i - 1];
-        const p1 = points[i];
+        const p0 = centerline[i - 1];
+        const p1 = centerline[i];
 
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
 
-        const segLen = Math.sqrt(dx * dx + dy * dy);
+        const segLen = Math.hypot(dx, dy);
+        const dh = p1.h - p0.h;
 
         if (acc + segLen >= targetDist) {
 
@@ -203,37 +200,31 @@ function pointAtDistance(points, targetDist) {
             return {
                 x: p0.x + dx * t,
                 y: p0.y + dy * t,
-                h: p0.h + (p1.h - p0.h) * t
+                h: p0.h + dh * t
             };
         }
 
         acc += segLen;
     }
 
-    return points[points.length - 1];
+    return centerline[centerline.length - 1];
 }
 
-// =========================
-// CROSSBAR
-// =========================
+function crossbar(p, center, offset, color) {
 
-function crossbar(p, cx, cy, offset, color) {
-
-    const nx = -Math.sin(p.h);
-    const ny = Math.cos(p.h);
+    const unitX = -Math.sin(p.h);
+    const unitY = Math.cos(p.h);
 
     const left = projectPoint(
-        p.x + nx * -offset,
-        p.y + ny * -offset,
-        cx,
-        cy
+        p.x + unitX * -offset,
+        p.y + unitY * -offset,
+        center
     );
 
     const right = projectPoint(
-        p.x + nx * offset,
-        p.y + ny * offset,
-        cx,
-        cy
+        p.x + unitX * offset,
+        p.y + unitY * offset,
+        center
     );
 
     return `
@@ -269,38 +260,32 @@ function drawFrame(w, h, values) {
     const curveLI = getSegmentInfluence(curveLVal);
     const curveRI = getSegmentInfluence(curveRVal);
 
-    // inward contraction amount (tunable)
-    const MAX_PAD = 120;
-
-    // space in between lines
-    const GAP = 32;
-
     return `
         <!-- TOP HORIZONTAL LINE -->
-        <line x1="${left + CORNER_RADIUS + MAX_PAD * topI + GAP}" y1="${top + MAX_PAD * topI}"
-              x2="${right - CORNER_RADIUS - MAX_PAD * topI - GAP}" y2="${top + MAX_PAD * topI}"
+        <line x1="${left + CORNER_RADIUS + PAD_CHANGE * topI + GAP}" y1="${top + PAD_CHANGE * topI}"
+              x2="${right - CORNER_RADIUS - PAD_CHANGE * topI - GAP}" y2="${top + PAD_CHANGE * topI}"
               stroke="${getSegmentColor(topVal)}"
               stroke-width="${FRAME_STROKE}"
               stroke-linecap="round" />
 
         <!-- LEFT VERTICAL LINE -->
-        <line x1="${left + MAX_PAD * leftI}" y1="${midTop + MAX_PAD * leftI + GAP}"
-              x2="${left + MAX_PAD * leftI}" y2="${h - FRAME_PADDING}"
+        <line x1="${left + PAD_CHANGE * leftI}" y1="${midTop + PAD_CHANGE * leftI + GAP}"
+              x2="${left + PAD_CHANGE * leftI}" y2="${h - FRAME_PADDING}"
               stroke="${getSegmentColor(leftVal)}"
               stroke-width="${FRAME_STROKE}"
               stroke-linecap="round" />
 
         <!-- RIGHT VERTICAL LINE -->
-        <line x1="${right - MAX_PAD * rightI}" y1="${midTop + MAX_PAD * rightI + GAP}"
-              x2="${right - MAX_PAD * rightI}" y2="${h - FRAME_PADDING}"
+        <line x1="${right - PAD_CHANGE * rightI}" y1="${midTop + PAD_CHANGE * rightI + GAP}"
+              x2="${right - PAD_CHANGE * rightI}" y2="${h - FRAME_PADDING}"
               stroke="${getSegmentColor(rightVal)}"
               stroke-width="${FRAME_STROKE}"
               stroke-linecap="round" />
 
         <!-- TOP LEFT CURVE -->
         <path d="
-            M ${left + MAX_PAD * curveLI} ${midTop + MAX_PAD * curveLI}
-            Q ${left + MAX_PAD * curveLI} ${top + MAX_PAD * curveLI} ${left + CORNER_RADIUS + MAX_PAD * curveLI} ${top + MAX_PAD * curveLI}
+            M ${left + PAD_CHANGE * curveLI} ${midTop + PAD_CHANGE * curveLI}
+            Q ${left + PAD_CHANGE * curveLI} ${top + PAD_CHANGE * curveLI} ${left + CORNER_RADIUS + PAD_CHANGE * curveLI} ${top + PAD_CHANGE * curveLI}
         "
         fill="none"
         stroke="${getSegmentColor(curveLVal)}"
@@ -309,8 +294,8 @@ function drawFrame(w, h, values) {
 
         <!-- TOP RIGHT CURVE -->
         <path d="
-            M ${right - MAX_PAD * curveRI} ${midTop + MAX_PAD * curveRI}
-            Q ${right - MAX_PAD * curveRI} ${top + MAX_PAD * curveRI} ${right - CORNER_RADIUS - MAX_PAD * curveRI} ${top + MAX_PAD * curveRI}
+            M ${right - PAD_CHANGE * curveRI} ${midTop + PAD_CHANGE * curveRI}
+            Q ${right - PAD_CHANGE * curveRI} ${top + PAD_CHANGE * curveRI} ${right - CORNER_RADIUS - PAD_CHANGE * curveRI} ${top + PAD_CHANGE * curveRI}
         "
         fill="none"
         stroke="${getSegmentColor(curveRVal)}"
@@ -377,30 +362,29 @@ function updatePaths() {
     const w = window.innerWidth;
     const h = window.innerHeight;
 
-    const cx = w / 2;
-    const cy = h;
+    const center = {
+        x: w / 2,
+        y: h - BOT_OFFSET
+    }
 
     const delta = steeringToDelta(steering);
     const Rraw = radius(delta);
     const turnDir = delta >= 0 ? 1 : -1;
 
-    const centerline = buildCenterline(
-        Math.max(2.5, Math.abs(Rraw)),
-        turnDir
-    );
+    const centerline = buildCenterline(Rraw, turnDir);
 
-    const half = W / 2;
+    const shift = WIDTH / 2;
 
-    const L_green = buildLane(centerline, cx, cy, -half, GREEN_LEN);
-    const L_yellow = buildLane(centerline, cx, cy, -half, YELLOW_LEN);
-    const L_red = buildLane(centerline, cx, cy, -half, RED_LEN);
+    const L_red = buildLane(centerline, center, -shift, 0, RED_LEN);
+    const L_yellow = buildLane(centerline, center, -shift, RED_LEN, YELLOW_LEN);
+    const L_green = buildLane(centerline, center, -shift, RED_LEN + YELLOW_LEN, GREEN_LEN);
 
-    const R_green = buildLane(centerline, cx, cy, half, GREEN_LEN);
-    const R_yellow = buildLane(centerline, cx, cy, half, YELLOW_LEN);
-    const R_red = buildLane(centerline, cx, cy, half, RED_LEN);
+    const R_red = buildLane(centerline, center, shift, 0, RED_LEN);
+    const R_yellow = buildLane(centerline, center, shift, RED_LEN, YELLOW_LEN);
+    const R_green = buildLane(centerline, center, shift, RED_LEN + YELLOW_LEN, GREEN_LEN);
 
     let out = `
-        ${drawFrame(w, h, distances)}
+         ${drawFrame(w, h, distances)}
 
         <path class="guide green" d="${L_green}" />
         <path class="guide yellow" d="${L_yellow}" />
@@ -412,12 +396,12 @@ function updatePaths() {
     `;
 
     const redP = pointAtDistance(centerline, RED_LEN);
-    const yellowP = pointAtDistance(centerline, YELLOW_LEN);
-    const greenP = pointAtDistance(centerline, GREEN_LEN);
+    const yellowP = pointAtDistance(centerline, RED_LEN + YELLOW_LEN);
+    const greenP = pointAtDistance(centerline, RED_LEN + YELLOW_LEN + GREEN_LEN);
 
-    out += crossbar(redP, cx, cy, half, "red");
-    out += crossbar(yellowP, cx, cy, half, "yellow");
-    out += crossbar(greenP, cx, cy, half, "green");
+    out += crossbar(redP, center, shift, "red");
+    out += crossbar(yellowP, center, shift, "yellow");
+    out += crossbar(greenP, center, shift, "green");
 
     svg.innerHTML = out;
 }
@@ -426,9 +410,8 @@ function updatePaths() {
 // LOOP
 // =========================
 
-function animate(now) {
-    lastTime = now;
-    steering += (targetSteering - steering) * 0.3;
+function animate() {
+    steering += (targetSteering - steering) * SMOOTHING;
 
     updatePaths();
 
