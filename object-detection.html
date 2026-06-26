@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Backup Camera Overlay</title>
+
+<style>
+html, body {
+    margin: 0;
+    width:  100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+}
+
+.container {
+    position: relative;
+    width: 800px;
+    height: 600px;
+}
+
+.container img {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.container svg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}
+
+</style>
+</head>
+
+<body>
+<div class="container">
+    <svg id="svg"></svg>
+    
+    <img src="SEV-top-down.png" alt="SEV Top Down View" />
+</div>
+
+<script>
+
+const svg = document.getElementById("svg");
+
+// =========================
+// FRAME OVERLAY
+// =========================
+
+const FRAME_STROKE = 12;
+
+const FRAME_MAX = 4;
+const FRAME_MIN = 1;
+
+// =========================
+// STATE
+// =========================
+
+let distances = [];
+
+// =========================
+// FRAME
+// =========================
+
+function drawDynamicFrame(arcs) {
+    let out = '';
+
+    const c = {
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2
+    };
+    const r = {
+        x: 210,
+        y: 285
+    }
+    const percentChange = 0.15; // how much the radius changes based on distance
+    
+    arcs.forEach(arc => {
+        const {centerDeg, widthDeg, distance} = arc;
+
+        const centerRad = centerDeg * (Math.PI / 180);
+        const widthRad = widthDeg * (Math.PI / 180);
+
+        const startAngle = centerRad - widthRad / 2;
+        const endAngle = centerRad + widthRad / 2;
+        
+        const rMod = {
+            x: r.x - r.x * percentChange * getSegmentInfluence(distance),
+            y: r.y - r.y * percentChange * getSegmentInfluence(distance)
+        }
+        const start = {
+            x: c.x + rMod.x * Math.cos(startAngle),
+            y: c.y + rMod.y * Math.sin(startAngle)
+        }
+        const end = {
+            x: c.x + rMod.x * Math.cos(endAngle),
+            y: c.y + rMod.y * Math.sin(endAngle)
+        }
+        
+        const largeArc = widthRad > Math.PI ? 1 : 0;
+        const sweep = 1; // clockwise
+
+        const influence = getSegmentInfluence(distance);
+
+        const pathData = `
+            <path d="
+                M ${start.x} ${start.y}
+                A ${rMod.x} ${rMod.y} 0 ${largeArc} ${sweep} ${end.x} ${end.y}
+            "
+                  fill="none"
+                  stroke="${getSegmentColor(distance)}"
+                  stroke-width="${FRAME_STROKE}"
+                  stroke-linecap="round" />
+        `;
+        out += pathData;
+    });
+    return out;
+}
+
+function getSegmentColor(value) {
+    const RED = { r: 255, g: 0, b: 0 };
+    const YELLOW = { r: 255, g: 255, b: 0 };
+    const GREEN = { r: 0, g: 200, b: 0 }; // bright green (adjust if needed)
+    const TRANSPARENT = {r:0, g:0, b:0, a: 0};
+
+    function lerp(a, b, t) {
+        return a + (b - a) * t;
+    }
+
+    function rgb(c) {
+        return `rgb(${c.r | 0}, ${c.g | 0}, ${c.b | 0})`;
+    }
+    function rgba(c) {
+        return `rgba(${c.r | 0}, ${c.g | 0}, ${c.b | 0}, ${c.a})`;
+    }
+
+    // clamp helpers
+    if (value <= FRAME_MIN) return rgb(RED);
+    if (value > FRAME_MAX) return 'transparent';
+
+    // split into two segments:
+    const mid = (FRAME_MIN + FRAME_MAX) / 2;
+
+    if (value <= mid) {
+        // red -> yellow
+        const t = (value - FRAME_MIN) / (mid - FRAME_MIN);
+        return rgb({
+            r: lerp(RED.r, YELLOW.r, t),
+            g: lerp(RED.g, YELLOW.g, t),
+            b: lerp(RED.b, YELLOW.b, t)
+        });
+    } else {
+        // yellow -> green
+        const t = (value - mid) / (FRAME_MAX - mid);
+        return rgb({
+            r: lerp(YELLOW.r, GREEN.r, t),
+            g: lerp(YELLOW.g, GREEN.g, t),
+            b: lerp(YELLOW.b, GREEN.b, t)
+        });
+    }
+}
+
+function getSegmentInfluence(value) {
+    // clamp + invert so:
+    // 2 => 0 (no shrink)
+    // 1 => 1 (max shrink)
+    if (value >= FRAME_MAX) return 0;
+    if (value <= FRAME_MIN) return 1;
+
+    return (FRAME_MAX - value) / (FRAME_MAX - FRAME_MIN);
+}
+
+// ==================
+// USED FOR TESTING
+// ==================
+let phase = 0;
+function buildArcs() {
+    const arcs = [];
+
+    for (let deg = 0; deg < 360; deg+=1) {
+        const distance =
+            2.5 +
+            1.5 * Math.cos(1 *(deg + phase) * Math.PI / 180);
+
+        arcs.push({
+            centerDeg: deg,
+            widthDeg: 1,
+            distance: distance
+        });
+    }
+
+    phase += 6; // speed of animation
+    return arcs;
+}
+
+// ===================
+// UPDATE RENDERING
+// ===================
+function updatePaths() {
+    arcs = buildArcs();
+    
+    svg.innerHTML = drawDynamicFrame(arcs);
+}
+
+// =========================
+// LOOP
+// =========================
+
+function animate() {
+    updatePaths();
+
+    requestAnimationFrame(animate);
+}
+
+animate();
+
+// =========================
+// WEBSOCKET
+// =========================
+
+const wsRealsense = new WebSocket("ws://127.0.0.1:8766");
+
+wsRealsense.onmessage = (event) => {
+
+    const data = JSON.parse(event.data);
+
+    if (data.type === "realsense") {
+        distances = data.distances;
+    }
+};
+
+</script>
+
+</body>
+</html>
