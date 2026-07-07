@@ -368,7 +368,8 @@ function updatePaths() {
     }
 
     const delta = steeringToDelta(steering);
-    const Rraw = radius(delta);
+    // turnDir has direction information, so the sign of R is redundant. Take absolute value to avoid double negatives
+    const Rraw = Math.abs(radius(delta));
     const turnDir = delta >= 0 ? 1 : -1;
 
     const centerline = buildCenterline(Rraw, turnDir);
