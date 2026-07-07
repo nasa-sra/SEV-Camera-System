@@ -41,7 +41,7 @@ html, body {
 <div class="container">
     <svg id="svg"></svg>
     
-    <img src="SEV-top-down.png" alt="SEV Top Down View" />
+    <img src="res/SEV-top-down.png" alt="SEV Top Down View" />
 </div>
 
 <script>
@@ -182,19 +182,19 @@ let phase = 0;
 function buildArcs() {
     const arcs = [];
 
-    for (let deg = 0; deg < 360; deg+=1) {
+    for (let deg = 0; deg < 360; deg+=30) {
         const distance =
             2.5 +
             1.5 * Math.cos(1 *(deg + phase) * Math.PI / 180);
 
         arcs.push({
             centerDeg: deg,
-            widthDeg: 1,
+            widthDeg: 20,
             distance: distance
         });
     }
 
-    phase += 6; // speed of animation
+    phase += 0; // speed of animation
     return arcs;
 }
 
