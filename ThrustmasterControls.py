@@ -1,4 +1,5 @@
 import pygame
+import keyboard
 import json
 import threading
 from websocket_server import WebsocketServer
@@ -25,6 +26,8 @@ FALLBACK_AXES = [0, 1]
 # =========================
 
 running = True
+shutdown_once = False
+shutdown_lock = threading.Lock()
 current = 0.0
 target = 0.0
 clients = []
@@ -46,6 +49,18 @@ server.set_fn_client_left(on_client_left)
 
 def ws_thread():
     server.run_forever()
+
+def close_server():
+    global running, shutdown_once
+
+    with shutdown_lock:
+        if shutdown_once:
+            return
+        shutdown_once = True
+        running = False
+
+    print("[OBS] shutting down websocket server")
+    server.shutdown()
 
 # =========================
 # JOYSTICK INIT
@@ -113,8 +128,7 @@ def joystick_loop(js, axis):
                 pass
 
         # ESC exit
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_ESCAPE]:
+        if keyboard.is_pressed("esc"):
             running = False
 
         clock.tick(60)
@@ -132,6 +146,7 @@ def main():
     try:
         joystick_loop(js, axis)
     finally:
+        close_server()
         pygame.quit()
 
 if __name__ == "__main__":

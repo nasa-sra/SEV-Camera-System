@@ -26,6 +26,7 @@ JOY_AXIS = 2
 # =========================
 
 running = True
+shutdown_once = False
 clients = []
 steering = 0
 
@@ -48,10 +49,24 @@ def send_all(msg):
         except:
             pass
 
+# There are two threads that may attempt a shutdown (the input loop and the main thread), so we need a lock to ensure that shutdown is only performed once
+shutdown_lock = threading.Lock()
+
+def close_server():
+    global running, shutdown_once
+
+    with shutdown_lock:
+        if shutdown_once:
+            return
+        shutdown_once = True
+        running = False
+
+    print("[OBS] shutting down websocket server")
+    server.shutdown()
+
 server = WebsocketServer(host="127.0.0.1", port=PORT)
 server.set_fn_new_client(new_client)
 server.set_fn_client_left(client_left)
-
 # =========================
 # JOYSTICK INIT
 # =========================
@@ -88,7 +103,7 @@ def input_loop():
 
         # ESC to exit
         if keyboard.is_pressed("esc"):
-            running = False
+            close_server()
             break
 
         joy_value = 0
@@ -164,4 +179,8 @@ print("====================================")
 try:
     server.run_forever()
 finally:
-    running = False
+    # Typically, we only reach this point when ESC is pressed, and the server is already closed
+    # However, if there was an error or keyboard interrupt, the server will still be open
+    # Thus, we call close_server() to ensure the server is closed properly
+    close_server()
+    pygame.quit()

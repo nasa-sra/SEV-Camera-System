@@ -12,6 +12,9 @@ import time
 # =========================
 
 PORT = 8766
+running = True
+shutdown_once = False
+shutdown_lock = threading.Lock()
 clients = []
 
 def new_client(client, server):
@@ -28,6 +31,20 @@ def send_all(msg):
             server.send_message(c, msg)
         except:
             pass
+
+
+def close_resources():
+    global running, shutdown_once
+
+    with shutdown_lock:
+        if shutdown_once:
+            return
+        shutdown_once = True
+        running = False
+
+    print("[SYSTEM] shutting down")
+    server.shutdown()
+    pipeline.stop()
 
 server = WebsocketServer(host="127.0.0.1", port=PORT)
 server.set_fn_new_client(new_client)
@@ -77,7 +94,7 @@ NUM_SECTORS = 5
 def input_loop():
     global last_values
     try:
-        while True:
+        while running:
 
             frames = pipeline.wait_for_frames()
             depth_frame = frames.get_depth_frame()
@@ -154,7 +171,7 @@ def input_loop():
             time.sleep(0.05)
 
     finally:
-        pipeline.stop()
+        close_resources()
 
 
 # =========================
@@ -171,4 +188,4 @@ print("====================================")
 try:
     server.run_forever()
 finally:
-    running = False
+    close_resources()
