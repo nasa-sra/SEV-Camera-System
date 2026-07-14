@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Backup Camera Overlay</title>
+<style>
+    body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 16px;
+        box-sizing: border-box;
+        background: #111;
+        color: #f5f5f5;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    .layout {
+        width: min(1100px, 100%);
+        display: grid;
+        grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+        gap: 16px;
+        align-items: stretch;
+    }
+
+    .telemetry {
+        min-width: 280px;
+        padding: 20px 24px;
+        border: 1px solid #333;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .telemetry h1 {
+        margin: 0 0 16px;
+        font-size: 1.25rem;
+    }
+
+    .telemetry-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 6px 0;
+        font-size: 1rem;
+    }
+
+    .telemetry-label {
+        color: #bdbdbd;
+    }
+
+    .telemetry-value {
+        font-variant-numeric: tabular-nums;
+    }
+
+    .plot-panel {
+        padding: 12px;
+        border: 1px solid #333;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.05);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+        display: flex;
+        align-items: stretch;
+    }
+
+    #centerline-canvas {
+        width: 100%;
+        height: 420px;
+        border-radius: 8px;
+        background: #080808;
+    }
+
+    @media (max-width: 900px) {
+        .layout {
+            grid-template-columns: 1fr;
+        }
+
+        #centerline-canvas {
+            height: 320px;
+        }
+    }
+</style>
+</head>
+
+<body>
+    <div class="layout">
+        <main class="telemetry">
+            <h1>Six-Wheel Telemetry</h1>
+            <div class="telemetry-row">
+                <span class="telemetry-label">dxdt</span>
+                <span class="telemetry-value" id="dxdt-value">0.000</span>
+            </div>
+            <div class="telemetry-row">
+                <span class="telemetry-label">dydt</span>
+                <span class="telemetry-value" id="dydt-value">0.000</span>
+            </div>
+            <div class="telemetry-row">
+                <span class="telemetry-label">dthetadt</span>
+                <span class="telemetry-value" id="dthetadt-value">0.000</span>
+            </div>
+        </main>
+
+        <section class="plot-panel">
+            <canvas id="centerline-canvas" aria-label="Projected centerline path"></canvas>
+        </section>
+    </div>
+
+    <script>
+        const OMEGA_EPSILON = 1e-8;
+        const PREDICTION_DURATION_SEC = 3;
+        const NUM_PATH_POINTS = 150;
+
+        function getXCoordinate(dx_dt, dy_dt, dtheta_dt, t) {
+            const x_0 = 0;
+            const theta_0 = 0;
+            if (Math.abs(dtheta_dt) < OMEGA_EPSILON) {
+                return x_0 + dx_dt * t;
+            }
+            return x_0 + (dx_dt / dtheta_dt) * (Math.sin(theta_0 + dtheta_dt * t) - Math.sin(theta_0)) + (dy_dt / dtheta_dt) * (Math.cos(theta_0 + dtheta_dt * t) - Math.cos(theta_0));
+        }
+
+        function getYCoordinate(dx_dt, dy_dt, dtheta_dt, t) {
+            const y_0 = 0;
+            const theta_0 = 0;
+            if (Math.abs(dtheta_dt) < OMEGA_EPSILON) {
+                return y_0 + dy_dt * t;
+            }
+            return y_0 - (dx_dt / dtheta_dt) * (Math.cos(theta_0 + dtheta_dt * t) - Math.cos(theta_0)) + (dy_dt / dtheta_dt) * (Math.sin(theta_0 + dtheta_dt * t) - Math.sin(theta_0));
+        }
+
+        function buildCenterlinePath(dx_dt, dy_dt, dtheta_dt, duration, numPoints) {
+            const path = [];
+            for (let i = 0; i <= numPoints; i++) {
+                const t = (i / numPoints) * duration;
+                const x = getXCoordinate(dx_dt, dy_dt, dtheta_dt, t);
+                const y = getYCoordinate(dx_dt, dy_dt, dtheta_dt, t);
+                path.push({ x: x, y: y });
+            }
+            return path;
+        }
+
+        let dxdt = 0;
+        let dydt = 0;
+        let dthetadt = 0;
+
+        const dxdtValue = document.getElementById("dxdt-value");
+        const dydtValue = document.getElementById("dydt-value");
+        const dthetadtValue = document.getElementById("dthetadt-value");
+        const canvas = document.getElementById("centerline-canvas");
+        const ctx = canvas.getContext("2d");
+
+        function fitCanvasToDisplaySize() {
+            const ratio = Math.max(window.devicePixelRatio || 1, 1);
+            const displayWidth = Math.floor(canvas.clientWidth);
+            const displayHeight = Math.floor(canvas.clientHeight);
+            const targetWidth = Math.max(1, Math.floor(displayWidth * ratio));
+            const targetHeight = Math.max(1, Math.floor(displayHeight * ratio));
+
+            if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+                canvas.width = targetWidth;
+                canvas.height = targetHeight;
+                return true;
+            }
+
+            return false;
+        }
+
+        function getPathBounds(path) {
+            let minX = 0;
+            let maxX = 0;
+            let minY = 0;
+            let maxY = 0;
+
+            for (const point of path) {
+                minX = Math.min(minX, point.x);
+                maxX = Math.max(maxX, point.x);
+                minY = Math.min(minY, point.y);
+                maxY = Math.max(maxY, point.y);
+            }
+
+            return { minX, maxX, minY, maxY };
+        }
+
+        function drawCenterline(path) {
+            const width = canvas.width;
+            const height = canvas.height;
+            const padding = 28;
+
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = "#080808";
+            ctx.fillRect(0, 0, width, height);
+
+            const bounds = getPathBounds(path);
+            const spanX = Math.max(bounds.maxX - bounds.minX, 0.1);
+            const spanY = Math.max(bounds.maxY - bounds.minY, 0.1);
+            const scaleX = (width - padding * 2) / spanX;
+            const scaleY = (height - padding * 2) / spanY;
+            const scale = Math.max(0.001, Math.min(scaleX, scaleY));
+            const centerX = (bounds.minX + bounds.maxX) * 0.5;
+            const centerY = (bounds.minY + bounds.maxY) * 0.5;
+
+            function toCanvas(point) {
+                return {
+                    x: width * 0.5 + (point.x - centerX) * scale,
+                    y: height * 0.5 - (point.y - centerY) * scale
+                };
+            }
+
+            const origin = toCanvas({ x: 0, y: 0 });
+
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(origin.x, 0);
+            ctx.lineTo(origin.x, height);
+            ctx.moveTo(0, origin.y);
+            ctx.lineTo(width, origin.y);
+            ctx.stroke();
+
+            ctx.strokeStyle = "#4ff08d";
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            path.forEach((point, index) => {
+                const p = toCanvas(point);
+                if (index === 0) {
+                    ctx.moveTo(p.x, p.y);
+                } else {
+                    ctx.lineTo(p.x, p.y);
+                }
+            });
+            ctx.stroke();
+
+            ctx.fillStyle = "#ffffff";
+            ctx.beginPath();
+            ctx.arc(origin.x, origin.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            const endPoint = toCanvas(path[path.length - 1]);
+            ctx.fillStyle = "#ff5c5c";
+            ctx.beginPath();
+            ctx.arc(endPoint.x, endPoint.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function formatValue(value) {
+            return Number.isFinite(value) ? value.toFixed(3) : String(value);
+        }
+
+        function renderTelemetry() {
+            dxdtValue.textContent = formatValue(dxdt);
+            dydtValue.textContent = formatValue(dydt);
+            dthetadtValue.textContent = formatValue(dthetadt);
+        }
+
+        function renderCenterline() {
+            fitCanvasToDisplaySize();
+            const path = buildCenterlinePath(dxdt, dydt, dthetadt, PREDICTION_DURATION_SEC, NUM_PATH_POINTS);
+            drawCenterline(path);
+        }
+
+        function renderAll() {
+            renderTelemetry();
+            renderCenterline();
+        }
+
+        const wsController = new WebSocket("ws://127.0.0.1:8765");
+
+        wsController.onmessage = (event) => {
+
+            const data = JSON.parse(event.data);
+
+            if (data.type === "six_wheel_controls") {
+                dxdt = data.dx_dt;
+                dydt = data.dy_dt;
+                dthetadt = data.dtheta_dt;
+                renderAll();
+            }
+        };
+
+        window.addEventListener("resize", () => {
+            renderCenterline();
+        });
+
+        renderAll();
+    </script>
+</body>
+</html>
