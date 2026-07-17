@@ -105,8 +105,6 @@ function drawDynamicFrame(arcs) {
         const largeArc = widthRad > Math.PI ? 1 : 0;
         const sweep = 1; // clockwise
 
-        const influence = getSegmentInfluence(distance);
-
         const pathData = `
             <path d="
                 M ${start.x} ${start.y}
@@ -134,9 +132,6 @@ function getSegmentColor(value) {
 
     function rgb(c) {
         return `rgb(${c.r | 0}, ${c.g | 0}, ${c.b | 0})`;
-    }
-    function rgba(c) {
-        return `rgba(${c.r | 0}, ${c.g | 0}, ${c.b | 0}, ${c.a})`;
     }
 
     // clamp helpers
@@ -166,9 +161,7 @@ function getSegmentColor(value) {
 }
 
 function getSegmentInfluence(value) {
-    // clamp + invert so:
-    // 2 => 0 (no shrink)
-    // 1 => 1 (max shrink)
+    // clamping
     if (value >= FRAME_MAX) return 0;
     if (value <= FRAME_MIN) return 1;
 
@@ -182,14 +175,17 @@ let phase = 0;
 function buildArcs() {
     const arcs = [];
 
-    for (let deg = 0; deg < 360; deg+=30) {
+    const numArcs = 60; // number of arcs to draw
+    const spacing = 3; // degrees of spacing between arcs (they are touching if spacing < 3)
+    const periods = 1; // number of periods within a single orbit (360 degrees)
+
+    for (let deg = 0; deg < 360; deg+=(360 / numArcs)) {
         const distance =
-            2.5 +
-            1.5 * Math.cos(1 *(deg + phase) * Math.PI / 180);
+            2.5 + 1.5 * Math.cos(periods *(deg + phase) * Math.PI / 180);
 
         arcs.push({
             centerDeg: deg,
-            widthDeg: 20,
+            widthDeg: (360 / numArcs) - spacing,
             distance: distance
         });
     }
