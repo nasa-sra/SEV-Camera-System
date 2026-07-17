@@ -23,3 +23,6 @@ Feel free to create multiple OBS sources for each of the three ports to display 
 ## How to Run Birds Eye View (BEV)
 To run the BEV simply open the terminal and cd into the src file before running the following command:  
 >`python -m pyth.bev.camera`
+
+## Documentation
+For more information and detailed explainations of the project feel free consult the [documentation](https://docs.google.com/document/d/1rlh5ox16vujK5E3M8FhVc80cgYnF4a7E6YKWXyLsM_I/edit?usp=sharing "SEV Backup Camera Documentation").
