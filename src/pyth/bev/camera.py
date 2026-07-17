@@ -19,12 +19,12 @@ def main():
         config.STREAM_PORT
     )
 
-    backup_streamer = Streamer(
-        config.SCALED_W,
-        config.SCALED_H,
-        config.CAPTURE_FPS,
-        config.BACKUP_STREAM_PORT
-    )
+    # backup_streamer = Streamer(
+    #     config.SCALED_W,
+    #     config.SCALED_H,
+    #     config.CAPTURE_FPS,
+    #     config.BACKUP_STREAM_PORT
+    # )
 
     raw_streamer = Streamer(
         config.SCALED_W,
@@ -34,8 +34,8 @@ def main():
     )
     
 
-    rays.initialize()
     warp.initialize()
+    # rays.initialize()
     
     while True:
 
@@ -49,8 +49,10 @@ def main():
             raw_stream = frame.copy()
 
         bev_warp = warp.process_frame(frame)
+        # bev_rays = rays.process_frame(frame)
 
         streamer.send(bev_warp)
+        # backup_streamer.send(bev_rays)
         raw_streamer.send(raw_stream)
 
 def draw_pts(frame, raw_pts):
