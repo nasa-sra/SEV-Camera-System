@@ -15,7 +15,7 @@ CAR_DRIVE = 1
 CRAB_DRIVE = 2
 SPIN = 3
 TIMESTEP = 0.01 # seconds
-STEER_RATE = 5 # degrees per second
+STEER_RATE = 15 # degrees per second
 WHEELBASE = 4 # meters
 WIDTH = 2.5 # meters
 PI = 3.141592
@@ -145,30 +145,21 @@ def input_loop():
                 w[i] = -math.atan2(wheel_y[i], wheel_x[i])
 
         # Simulate small odometry errors by adding a small random offset to each wheel angle
-        for i in range(6):
-            w[i] += np.random.normal(0, 0.01)
+        # for i in range(6):
+        #     w[i] += np.random.normal(0, 0.01)
 
-        # Right now, wheel angles are simulated and thus are all internally consistent, giving us clean numbers for the velocity and yaw rate of the vehicle
-        # In fact, we could just directly calculate velocity and yaw rate instead of messing with wheel angles
-        # However, in the future the wheel angles will be odometry data from the SEV
-        # Small odometry errors, skidding, etc. mean that each individual wheel will disagree slightly on the velocity and yaw rate of the vehicle
-        # The orientation of each wheel gives us one equation constraining the vehicle's motion.
-        # There are three unknowns: dx/dt, dy/dt, and dtheta/dt
-        # Six equations and three unknowns gives us an overdetermined system of equations
-        # Small errors mentioned above mean the system will almost certainly have no exact solution
-        # So we use a least-squares approach to "solve" the equation, minimizing error. This method naturally corrects for odometry and skidding errors...
-        # ... and should give us an accurate prediction of how the SEV will move.
-        # Thank you for attending my TED Talk.
+        # The following code calculates the instantaneous velocity of the vehicle from wheel orientations.
+        # The final code is surprisingly simple, but the derivation is too long to fit in this comment.
+        # For the complete derivation, see docs/TrajectoryDerivation/main.tex
+        # Or see the compiled PDF in the Google Drive folder (BackupCameraDerivation.pdf)
         
         # Define s_x to be a list of the x-components of the wheel orientation vectors
+        # You may be surprised to see that the x-component is sin(theta), but that's because our coordinate system is defined with the positive y-axis at the 0-degree angle instead of the positive x-axis.
         s_x = [math.sin(w[0]), math.sin(w[1]), math.sin(w[2]), math.sin(w[3]), math.sin(w[4]), math.sin(w[5])]
 
         # Define s_y to be a list of the y-components of the wheel orientation vectors
         s_y = [math.cos(w[0]), math.cos(w[1]), math.cos(w[2]), math.cos(w[3]), math.cos(w[4]), math.cos(w[5])]
 
-        # The derivation for this surprisingly simple matrix is a little too long, and I've written too many comments already
-        # For the complete derivation, see docs/TrajectoryDerivation/main.tex
-        # Or see the compiled PDF in the Google Drive folder (BackupCameraDerivation.pdf)
         A = np.zeros((6, 3))
         for i in range(6):
             A[i, 0] = -s_y[i]
@@ -186,9 +177,15 @@ def input_loop():
         else:
             motion_dir = motion_dir / norm
 
-            # Keep direction sign consistent frame-to-frame to avoid flickering.
-            if prev_motion_dir is not None and np.dot(motion_dir, prev_motion_dir) < 0:
+            # We just solved for the SEV trajectory... but it could be either forwards or backwards.
+            # This is a backup camera, so we want to prefer the backwards direction. The positive y-axis points to the front of the vehicle...
+            # ...so we just need to ensure that dy_dt < 0.
+            if motion_dir[1] > 0:
                 motion_dir = -motion_dir
+
+            # Keep direction sign consistent frame-to-frame to avoid flickering.
+            #if prev_motion_dir is not None and np.dot(motion_dir, prev_motion_dir) < 0:
+            #    motion_dir = -motion_dir
 
             prev_motion_dir = motion_dir.copy()
             dx_dt = float(MOTION_SCALE * motion_dir[0])

@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Backup Camera Overlay</title>
 <style>
+    :root {
+        /* Adjust this to change the canvas shape (for example: 16 / 9, 1 / 1). */
+        --centerline-canvas-aspect-ratio: 4 / 3;
+    }
+
     body {
         margin: 0;
         min-height: 100vh;
@@ -67,7 +72,8 @@
 
     #centerline-canvas {
         width: 100%;
-        height: 420px;
+        height: auto;
+        aspect-ratio: var(--centerline-canvas-aspect-ratio);
         border-radius: 8px;
         background: #080808;
     }
@@ -75,10 +81,6 @@
     @media (max-width: 900px) {
         .layout {
             grid-template-columns: 1fr;
-        }
-
-        #centerline-canvas {
-            height: 320px;
         }
     }
 </style>
@@ -100,6 +102,10 @@
                 <span class="telemetry-label">dthetadt</span>
                 <span class="telemetry-value" id="dthetadt-value">0.000</span>
             </div>
+            <div class="telemetry-row">
+                <span class="telemetry-label">centerline length</span>
+                <span class="telemetry-value" id="centerline-length-value">0.000</span>
+            </div>
         </main>
 
         <section class="plot-panel">
@@ -109,8 +115,87 @@
 
     <script>
         const OMEGA_EPSILON = 1e-8;
-        const PREDICTION_DURATION_SEC = 3;
-        const NUM_PATH_POINTS = 150;
+        const PREDICTION_PATH_LENGTH = 12; // meters
+        const PREDICTION_PATH_RESOLUTION = 0.05; // seconds
+        const NUM_PATH_POINTS = 1000;
+        const CENTERLINE_WIDTH_METERS = 5; // The wheeelbase is 2.5 meters across (I think?) but the cabin is 3.
+        const MIRROR_HORIZONTAL = true;
+        const NEAR_COLOR = { r: 79, g: 240, b: 141 };
+        const FAR_COLOR = { r: 255, g: 92, b: 92 };
+        // Projected points are returned in normalized device coordinates (roughly [-1, 1]).
+        // Keep a little margin so the path lands neatly inside the canvas frame.
+        const VIEW_MIN_X = -0.9;
+        const VIEW_MAX_X = 0.9;
+        const VIEW_MIN_Y = -0.9;
+        const VIEW_MAX_Y = 0.9;
+
+        function crossProduct(a, b) {
+            return {
+                x: a.y * b.z - a.z * b.y,
+                y: a.z * b.x - a.x * b.z,
+                z: a.x * b.y - a.y * b.x
+            };
+        }
+
+        function dotProduct(a, b) {
+            return a.x * b.x + a.y * b.y + a.z * b.z;
+        }
+
+        function normalizeVector(v) {
+            const norm = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+            if (norm < 1e-12) {
+                return { x: 0, y: 0, z: 0 };
+            }
+            return {
+                x: v.x / norm,
+                y: v.y / norm,
+                z: v.z / norm
+            };
+        }
+
+        function multiplyMatrixAndPoint(matrix, point) {
+            const result = [];
+            for (let i = 0; i < matrix.length; i++) {
+                let sum = 0;
+                for (let j = 0; j < point.length; j++) {
+                    sum += matrix[i][j] * point[j];
+                }
+                result.push(sum);
+            }
+            return result;
+        }
+
+        function lerp(a, b, t) {
+            return a + (b - a) * t;
+        }
+
+        function depthToColor(t, alpha) {
+            const clamped = Math.max(0, Math.min(1, t));
+            const r = Math.round(lerp(NEAR_COLOR.r, FAR_COLOR.r, clamped));
+            const g = Math.round(lerp(NEAR_COLOR.g, FAR_COLOR.g, clamped));
+            const b = Math.round(lerp(NEAR_COLOR.b, FAR_COLOR.b, clamped));
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
+        function projectPoint(x, y, viewMatrix, projectionMatrix) {
+            const point = [x, y, 0, 1];
+            const viewPoint = multiplyMatrixAndPoint(viewMatrix, point);
+            const projectedPoint = multiplyMatrixAndPoint(projectionMatrix, viewPoint);
+
+            const w = projectedPoint[3];
+            if (!Number.isFinite(w) || w <= 1e-8) {
+                return null;
+            }
+
+            const ndcX = projectedPoint[0] / w;
+            const ndcY = projectedPoint[1] / w;
+
+            if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY)) {
+                return null;
+            }
+
+            return { x: ndcX, y: ndcY, depth: w };
+        }
 
         function getXCoordinate(dx_dt, dy_dt, dtheta_dt, t) {
             const x_0 = 0;
@@ -130,24 +215,40 @@
             return y_0 - (dx_dt / dtheta_dt) * (Math.cos(theta_0 + dtheta_dt * t) - Math.cos(theta_0)) + (dy_dt / dtheta_dt) * (Math.sin(theta_0 + dtheta_dt * t) - Math.sin(theta_0));
         }
 
-        function buildCenterlinePath(dx_dt, dy_dt, dtheta_dt, duration, numPoints) {
+        function buildCenterlinePath(dx_dt, dy_dt, dtheta_dt, length, resolution, numPoints) {
             const path = [];
-            for (let i = 0; i <= numPoints; i++) {
-                const t = (i / numPoints) * duration;
+            let t = 0;
+            let renderedLength = 0;
+            let lastX = 0;
+            let lastY = 0;
+            let pts = 0;
+            while (renderedLength < length && pts < numPoints) {
+                t += resolution;
                 const x = getXCoordinate(dx_dt, dy_dt, dtheta_dt, t);
                 const y = getYCoordinate(dx_dt, dy_dt, dtheta_dt, t);
                 path.push({ x: x, y: y });
+
+                renderedLength += Math.sqrt((x - lastX) ** 2 + (y - lastY) ** 2);
+
+                lastX = x;
+                lastY = y;
+                pts++;
             }
-            return path;
+            return {
+                path: path,
+                renderedLength: renderedLength
+            };
         }
 
         let dxdt = 0;
         let dydt = 0;
         let dthetadt = 0;
+        let centerlineLength = 0;
 
         const dxdtValue = document.getElementById("dxdt-value");
         const dydtValue = document.getElementById("dydt-value");
         const dthetadtValue = document.getElementById("dthetadt-value");
+        const centerlineLengthValue = document.getElementById("centerline-length-value");
         const canvas = document.getElementById("centerline-canvas");
         const ctx = canvas.getContext("2d");
 
@@ -167,81 +268,231 @@
             return false;
         }
 
-        function getPathBounds(path) {
-            let minX = 0;
-            let maxX = 0;
-            let minY = 0;
-            let maxY = 0;
-
-            for (const point of path) {
-                minX = Math.min(minX, point.x);
-                maxX = Math.max(maxX, point.x);
-                minY = Math.min(minY, point.y);
-                maxY = Math.max(maxY, point.y);
-            }
-
-            return { minX, maxX, minY, maxY };
-        }
-
         function drawCenterline(path) {
             const width = canvas.width;
             const height = canvas.height;
             const padding = 28;
+            const halfWidth = CENTERLINE_WIDTH_METERS * 0.5;
 
             ctx.clearRect(0, 0, width, height);
             ctx.fillStyle = "#080808";
             ctx.fillRect(0, 0, width, height);
 
-            const bounds = getPathBounds(path);
-            const spanX = Math.max(bounds.maxX - bounds.minX, 0.1);
-            const spanY = Math.max(bounds.maxY - bounds.minY, 0.1);
-            const scaleX = (width - padding * 2) / spanX;
-            const scaleY = (height - padding * 2) / spanY;
+            const viewSpanX = VIEW_MAX_X - VIEW_MIN_X;
+            const viewSpanY = VIEW_MAX_Y - VIEW_MIN_Y;
+            const scaleX = (width - padding * 2) / viewSpanX;
+            const scaleY = (height - padding * 2) / viewSpanY;
             const scale = Math.max(0.001, Math.min(scaleX, scaleY));
-            const centerX = (bounds.minX + bounds.maxX) * 0.5;
-            const centerY = (bounds.minY + bounds.maxY) * 0.5;
+            const contentWidth = viewSpanX * scale;
+            const contentHeight = viewSpanY * scale;
+            const offsetX = (width - contentWidth) * 0.5;
+            const offsetY = (height - contentHeight) * 0.5;
 
-            function toCanvas(point) {
+            // Camera position: (0, 2.78, 0.29) BUT that is for x to the side, y up, z back
+            // In our coordinates, that's (0, -0.29, 2.78)
+            // ALSO coordinate system is offset towards the back (in OUR -y direction) by 0.83 m
+            // So... the coordinates are (0, -0.29 - 0.83, 2.78) = (0, -1.12, 2.78)
+            // The CAD didn't include the chariot, so the camera might actually be a little higher
+            // There's some error in the z-coordinate, could definitely be changed
+
+            // As for the direction:
+            // Start point is (0, 2.82, 0.16) in original coords, (0, -0.16, 2.82) in ours
+            // End point is (0, 2.78, 0.29) in original coords, (0, -0.29, 2.78) in ours
+            // So the direction vector is (0, -0.29 + 0.16, 2.78 - 2.82) = (0, -0.13, -0.04)
+
+            const cameraPosition = { x: 0, y: -1.12, z: 2.78 };
+            let cameraForward = normalizeVector({ x: 0, y: -0.13, z: -0.04 });
+            const worldUp = { x: 0, y: 0, z: 1 };
+            let cameraRight = normalizeVector(crossProduct(cameraForward, worldUp));
+            if (Math.abs(cameraRight.x) + Math.abs(cameraRight.y) + Math.abs(cameraRight.z) < 1e-8) {
+                cameraRight = { x: 1, y: 0, z: 0 };
+            }
+            const trueUp = normalizeVector(crossProduct(cameraRight, cameraForward));
+
+            let viewMatrix = [
+                [cameraRight.x, cameraRight.y, cameraRight.z, -dotProduct(cameraRight, cameraPosition)],
+                [trueUp.x, trueUp.y, trueUp.z, -dotProduct(trueUp, cameraPosition)],
+                [-cameraForward.x, -cameraForward.y, -cameraForward.z, dotProduct(cameraForward, cameraPosition)],
+                [0, 0, 0, 1]
+            ];
+
+            // Using specs from the Logitech C270 HD Webcam (which I think is the camera on the SEV), we have the following:
+            // Aspect ratio is 16:9, diagonal FOV is 55 degrees
+            let a = 4.0 / 3.0;
+            let theta_d = 55.0 * (Math.PI / 180.0);
+            // Near and far planes are arbitrary. If we ever switch to a depth camera we'll just have to remember to cast depth into this range.
+            let f = 1000; // Far plane
+            let n = 0.1; // Near plane
+
+            let projectionMatrix = [
+                [Math.sqrt(1 + a ** 2) / (a * Math.tan(theta_d / 2)), 0, 0, 0],
+                [0, Math.sqrt(1 + a ** 2) / Math.tan(theta_d / 2), 0, 0],
+                [0, 0, -(f + n) / (f - n), -(2 * f * n) / (f - n)],
+                [0, 0, -1, 0]
+            ];
+
+            function ndcToCanvas(ndcPoint) {
+                const ndcX = MIRROR_HORIZONTAL ? -ndcPoint.x : ndcPoint.x;
                 return {
-                    x: width * 0.5 + (point.x - centerX) * scale,
-                    y: height * 0.5 - (point.y - centerY) * scale
+                    x: offsetX + (ndcX - VIEW_MIN_X) * scale,
+                    y: height - offsetY - (ndcPoint.y - VIEW_MIN_Y) * scale
                 };
             }
 
-            const origin = toCanvas({ x: 0, y: 0 });
+            const originNdc = projectPoint(0, 0, viewMatrix, projectionMatrix);
+            const origin = originNdc ? ndcToCanvas(originNdc) : null;
 
-            ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(origin.x, 0);
-            ctx.lineTo(origin.x, height);
-            ctx.moveTo(0, origin.y);
-            ctx.lineTo(width, origin.y);
-            ctx.stroke();
+            if (origin) {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(origin.x, 0);
+                ctx.lineTo(origin.x, height);
+                ctx.moveTo(0, origin.y);
+                ctx.lineTo(width, origin.y);
+                ctx.stroke();
+            }
 
             ctx.strokeStyle = "#4ff08d";
-            ctx.lineWidth = 2.5;
-            ctx.beginPath();
-            path.forEach((point, index) => {
-                const p = toCanvas(point);
-                if (index === 0) {
-                    ctx.moveTo(p.x, p.y);
+            const ribbonSamples = [];
+            for (let i = 0; i < path.length; i++) {
+                let tangentX;
+                let tangentY;
+
+                if (i === 0 && path.length > 1) {
+                    tangentX = path[1].x - path[0].x;
+                    tangentY = path[1].y - path[0].y;
+                } else if (i === path.length - 1 && path.length > 1) {
+                    tangentX = path[i].x - path[i - 1].x;
+                    tangentY = path[i].y - path[i - 1].y;
+                } else if (path.length > 2) {
+                    tangentX = path[i + 1].x - path[i - 1].x;
+                    tangentY = path[i + 1].y - path[i - 1].y;
                 } else {
-                    ctx.lineTo(p.x, p.y);
+                    tangentX = 0;
+                    tangentY = 1;
                 }
-            });
+
+                const tangentNorm = Math.hypot(tangentX, tangentY);
+                if (tangentNorm < 1e-8) {
+                    ribbonSamples.push({ valid: false });
+                    continue;
+                }
+
+                const normalX = -tangentY / tangentNorm;
+                const normalY = tangentX / tangentNorm;
+
+                const center = path[i];
+                const leftWorld = {
+                    x: center.x + normalX * halfWidth,
+                    y: center.y + normalY * halfWidth
+                };
+                const rightWorld = {
+                    x: center.x - normalX * halfWidth,
+                    y: center.y - normalY * halfWidth
+                };
+
+                const centerNdc = projectPoint(center.x, center.y, viewMatrix, projectionMatrix);
+                const leftNdc = projectPoint(leftWorld.x, leftWorld.y, viewMatrix, projectionMatrix);
+                const rightNdc = projectPoint(rightWorld.x, rightWorld.y, viewMatrix, projectionMatrix);
+
+                if (!centerNdc || !leftNdc || !rightNdc) {
+                    ribbonSamples.push({ valid: false, centerNdc: centerNdc });
+                    continue;
+                }
+
+                ribbonSamples.push({
+                    valid: true,
+                    centerNdc: centerNdc,
+                    depth: centerNdc.depth,
+                    left: ndcToCanvas(leftNdc),
+                    right: ndcToCanvas(rightNdc),
+                    center: ndcToCanvas(centerNdc)
+                });
+            }
+
+            let minDepth = Infinity;
+            let maxDepth = -Infinity;
+            for (const sample of ribbonSamples) {
+                if (!sample.valid) {
+                    continue;
+                }
+                minDepth = Math.min(minDepth, sample.depth);
+                maxDepth = Math.max(maxDepth, sample.depth);
+            }
+            const depthSpan = Math.max(maxDepth - minDepth, 1e-6);
+
+            for (let i = 1; i < ribbonSamples.length; i++) {
+                const prev = ribbonSamples[i - 1];
+                const curr = ribbonSamples[i];
+                if (!prev.valid || !curr.valid) {
+                    continue;
+                }
+
+                const segmentDepth = 0.5 * (prev.depth + curr.depth);
+                const depthT = (segmentDepth - minDepth) / depthSpan;
+                ctx.fillStyle = depthToColor(depthT, 0.30);
+
+                ctx.beginPath();
+                ctx.moveTo(prev.left.x, prev.left.y);
+                ctx.lineTo(curr.left.x, curr.left.y);
+                ctx.lineTo(curr.right.x, curr.right.y);
+                ctx.lineTo(prev.right.x, prev.right.y);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            ctx.strokeStyle = "#4ff08d";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            let leftPenDown = false;
+            for (const sample of ribbonSamples) {
+                if (!sample.valid) {
+                    leftPenDown = false;
+                    continue;
+                }
+                if (!leftPenDown) {
+                    ctx.moveTo(sample.left.x, sample.left.y);
+                    leftPenDown = true;
+                } else {
+                    ctx.lineTo(sample.left.x, sample.left.y);
+                }
+            }
             ctx.stroke();
 
-            ctx.fillStyle = "#ffffff";
             ctx.beginPath();
-            ctx.arc(origin.x, origin.y, 4, 0, Math.PI * 2);
-            ctx.fill();
+            let rightPenDown = false;
+            for (const sample of ribbonSamples) {
+                if (!sample.valid) {
+                    rightPenDown = false;
+                    continue;
+                }
+                if (!rightPenDown) {
+                    ctx.moveTo(sample.right.x, sample.right.y);
+                    rightPenDown = true;
+                } else {
+                    ctx.lineTo(sample.right.x, sample.right.y);
+                }
+            }
+            ctx.stroke();
 
-            const endPoint = toCanvas(path[path.length - 1]);
-            ctx.fillStyle = "#ff5c5c";
-            ctx.beginPath();
-            ctx.arc(endPoint.x, endPoint.y, 4, 0, Math.PI * 2);
-            ctx.fill();
+            if (origin) {
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath();
+                ctx.arc(origin.x, origin.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            if (path.length > 0) {
+                const endPointNdc = projectPoint(path[path.length - 1].x, path[path.length - 1].y, viewMatrix, projectionMatrix);
+                if (endPointNdc) {
+                    const endPoint = ndcToCanvas(endPointNdc);
+                    ctx.fillStyle = "#ff5c5c";
+                    ctx.beginPath();
+                    ctx.arc(endPoint.x, endPoint.y, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
         }
 
         function formatValue(value) {
@@ -252,12 +503,14 @@
             dxdtValue.textContent = formatValue(dxdt);
             dydtValue.textContent = formatValue(dydt);
             dthetadtValue.textContent = formatValue(dthetadt);
+            centerlineLengthValue.textContent = formatValue(centerlineLength);
         }
 
         function renderCenterline() {
             fitCanvasToDisplaySize();
-            const path = buildCenterlinePath(dxdt, dydt, dthetadt, PREDICTION_DURATION_SEC, NUM_PATH_POINTS);
-            drawCenterline(path);
+            const centerline = buildCenterlinePath(dxdt, dydt, dthetadt, PREDICTION_PATH_LENGTH, PREDICTION_PATH_RESOLUTION, NUM_PATH_POINTS);
+            centerlineLength = centerline.renderedLength;
+            drawCenterline(centerline.path);
         }
 
         function renderAll() {
